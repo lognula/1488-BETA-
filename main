@@ -1,0 +1,1026 @@
+-- 1488 (BETA) — penablox RECODE
+-- Koch bratan
+local hitSoundId = "rbxassetid://111902710547432"
+local DB_KEY = "1488_beta_config_v1"
+local CONFIG_VERSION = 4 -- поднято из-за смены названия
+
+local tab_main = menu.new_tab("1488 (BETA)", "rbxassetid://10734975692")
+local tab_aa = menu.new_tab("Anti-Aim", "rbxassetid://10734975692")
+local tab_practice = menu.new_tab("Practice", "rbxassetid://10734975692")
+local tab_config = menu.new_tab("Config", "rbxassetid://10734975692")
+
+-- ============================================================
+-- UTILITIES
+-- ============================================================
+local function clamp(value, minimum, maximum)
+    if type(value) ~= "number" or value ~= value then return minimum end
+    return math.max(minimum, math.min(maximum, value))
+end
+
+local function call_or(fallback, callback, ...)
+    local ok, result = pcall(callback, ...)
+    if ok then return result end
+    return fallback
+end
+
+local function normalized_angle(value)
+    return ((tonumber(value) or 0) + 180) % 360 - 180
+end
+
+local function parse_timed_sequence(value, minimum, maximum, allowed_tokens)
+    local parsed = { steps = {}, total = 0 }
+    local source = tostring(value or ""):gsub(";", ",")
+    if #source > 1024 then return nil end
+
+    for raw_token in string.gmatch(source .. ",", "([^,]+),") do
+        local compact = raw_token:gsub("%s+", "")
+        local value_text, duration_text = compact:match("^(.-):(%d+)$")
+        if value_text == nil then
+            value_text = compact
+            duration_text = "1"
+        end
+
+        local duration = tonumber(duration_text)
+        local numeric = tonumber(value_text)
+        local step_value = nil
+
+        if numeric ~= nil and numeric == numeric then
+            step_value = clamp(numeric, minimum, maximum)
+        elseif allowed_tokens ~= nil then
+            local token = string.upper(value_text)
+            if allowed_tokens[token] then step_value = token end
+        end
+
+        if step_value == nil or duration == nil or duration < 1 or duration > 256 or duration ~= math.floor(duration) then
+            return nil
+        end
+
+        table.insert(parsed.steps, { value = step_value, duration = duration })
+        parsed.total = parsed.total + duration
+        if #parsed.steps >= 32 then break end
+    end
+
+    if #parsed.steps == 0 or parsed.total <= 0 then return nil end
+    return parsed
+end
+
+local function parse_sequence_or_default(value, minimum, maximum, allowed_tokens, fallback)
+    return parse_timed_sequence(value, minimum, maximum, allowed_tokens)
+        or parse_timed_sequence(fallback, minimum, maximum, allowed_tokens)
+end
+
+local function sample_timed_sequence(sequence, step)
+    if sequence == nil or sequence.total == nil or sequence.total <= 0 then return 0 end
+    local cursor = math.floor(tonumber(step) or 0) % sequence.total
+    for _, item in ipairs(sequence.steps) do
+        if cursor < item.duration then return item.value end
+        cursor = cursor - item.duration
+    end
+    return sequence.steps[1].value
+end
+
+local function deterministic_unit(step)
+    local value = (step * 1103515245 + 12345) % 2147483648
+    return (value % 100001) / 100000
+end
+
+local function deterministic_between(step, value_a, value_b)
+    local minimum = math.min(value_a, value_b)
+    local maximum = math.max(value_a, value_b)
+    return minimum + (maximum - minimum) * deterministic_unit(step)
+end
+
+-- ============================================================
+-- CONFIG REGISTRY
+-- ============================================================
+local config_controls = {}
+local DEFAULT_PRESET = {}
+
+local function reg(name, control)
+    if control == nil then return end
+    config_controls[name] = control
+    if DEFAULT_PRESET[name] == nil then
+        DEFAULT_PRESET[name] = control:get()
+    end
+end
+
+local function apply_config_values(values)
+    if type(values) ~= "table" then return false end
+    for name, handle in pairs(config_controls) do
+        if values[name] ~= nil then
+            pcall(function() handle:set(values[name]) end)
+        end
+    end
+    return true
+end
+
+local function collect_config_values()
+    local values = {}
+    for name, handle in pairs(config_controls) do
+        values[name] = handle:get()
+    end
+    values.config_version = CONFIG_VERSION
+    values.config_format = "1488_beta"
+    return values
+end
+
+local function save_config()
+    local values = collect_config_values()
+    pcall(function()
+        database.write(DB_KEY, values)
+        database.flush()
+    end)
+end
+
+local function load_config()
+    local values = call_or(nil, database.read, DB_KEY)
+    if type(values) ~= "table" or values.config_version ~= CONFIG_VERSION then
+        apply_config_values(DEFAULT_PRESET)
+        save_config()
+        return
+    end
+    apply_config_values(values)
+end
+
+-- ============================================================
+-- ANTI-AIM + PHANTOM HEAD + STATE OVERRIDE + MADNESS
+-- ============================================================
+local function setupAntiAim(section_left, section_right)
+    -- === ЛЕВАЯ КОЛОНКА (ОСНОВНАЯ) ===
+    local enabled = section_left:new_toggle("Enable Custom Anti-Aim", true)
+    local pitch = section_left:new_combobox("Pitch", { "Down", "Zero", "Up", "Custom", "Jitter", "Mega" }, "Down")
+    local customPitch = section_left:new_slider("Custom pitch", -89, 89, -89, 0, " deg")
+    local standing = section_left:new_slider("Standing jitter", 0, 90, 60, 0, " deg")
+    local moving = section_left:new_slider("Moving jitter", 0, 90, 40, 0, " deg")
+    local airborne = section_left:new_slider("Airborne jitter", 0, 90, 50, 0, " deg")
+    local crouching = section_left:new_slider("Crouching jitter", 0, 90, 45, 0, " deg")
+    local desync = section_left:new_slider("Desync limit", 0, 86, 58, 0, " deg")
+    local reactToDamage = section_left:new_toggle("Switch side on damage", true)
+    local invertKey = section_left:new_keybind("Invert side", "Toggle", "F")
+    local autoInvert = section_left:new_toggle("Auto invert", true)
+    local invertInterval = section_left:new_slider("Invert delay", 1, 32, 1, 0, "t")
+
+    -- State override
+    local stateEnabled = section_left:new_toggle("State override", false)
+    local stateMode = section_left:new_combobox("Override mode", { "Spin", "Madness" }, "Spin")
+    local stateOnStand = section_left:new_toggle("Standing", false)
+    local stateOnRun = section_left:new_toggle("Running", false)
+    local stateOnDuck = section_left:new_toggle("Crouching", false)
+    local stateOnAir = section_left:new_toggle("Air / jumping", false)
+    local statePitch = section_left:new_slider("State pitch", -89, 89, 0, 0, "°")
+    local stateYawOffset = section_left:new_slider("State yaw offset", -180, 180, 0, 0, "°")
+    local stateSpinDirection = section_left:new_combobox("Spin direction", { "Right", "Left" }, "Right")
+    local stateSpinSpeed = section_left:new_slider("Spin speed", 30, 1440, 720, 0, "°/s")
+    local stateMadnessPeriod = section_left:new_slider("Madness rate", 1, 32, 2, 0, "t")
+    local stateMadnessPitchMin = section_left:new_slider("Madness min", -89, 89, -89, 0, "°")
+    local stateMadnessPitchMax = section_left:new_slider("Madness max", -89, 89, 89, 0, "°")
+    local stateMadnessYawRange = section_left:new_slider("Madness range", 0, 180, 180, 0, "°")
+    local stateMadnessDesync = section_left:new_toggle("Random desync", true)
+    local stateUpperBodyChaos = section_left:new_toggle("Body chaos", false)
+    local stateBodyChaosStrength = section_left:new_slider("Chaos strength", 0, 89, 65, 0, "°")
+    local stateDisableFakeLag = section_left:new_toggle("No fake lag", false)
+
+    -- === ПРАВАЯ КОЛОНКА (PHANTOM HEAD & LAG) ===
+    local phantomHeadEnabled = section_right:new_toggle("Phantom Head", false)
+    local headAngle = section_right:new_slider("Head Yaw Angle", 30, 89, 88, 0, "°")
+    local autoSideSwitch = section_right:new_toggle("Auto Side Switch", true)
+    local switchTimer = section_right:new_slider("Switch Timer", 16, 128, 32, 0, "t")
+    
+    local fakeLagEnabled = section_right:new_toggle("Fake Lag", false)
+    local fakeLagTicks = section_right:new_slider("Fake Lag Ticks", 1, 14, 12, 0, "t")
+
+    reg("aa_enabled", enabled)
+    reg("aa_phantomhead_enabled", phantomHeadEnabled)
+    reg("aa_phantomhead_angle", headAngle)
+    reg("aa_phantomhead_auto", autoSideSwitch)
+    reg("aa_phantomhead_timer", switchTimer)
+    reg("aa_fakelag_enabled", fakeLagEnabled)
+    reg("aa_fakelag_ticks", fakeLagTicks)
+    
+    reg("aa_pitch", pitch)
+    reg("aa_custom_pitch", customPitch)
+    reg("aa_standing", standing)
+    reg("aa_moving", moving)
+    reg("aa_airborne", airborne)
+    reg("aa_crouching", crouching)
+    reg("aa_desync", desync)
+    reg("aa_react_damage", reactToDamage)
+    reg("aa_auto_invert", autoInvert)
+    reg("aa_invert_interval", invertInterval)
+    reg("aa_state_enabled", stateEnabled)
+    reg("aa_state_mode", stateMode)
+    reg("aa_state_stand", stateOnStand)
+    reg("aa_state_run", stateOnRun)
+    reg("aa_state_duck", stateOnDuck)
+    reg("aa_state_air", stateOnAir)
+    reg("aa_state_pitch", statePitch)
+    reg("aa_state_yaw_offset", stateYawOffset)
+    reg("aa_state_spin_direction", stateSpinDirection)
+    reg("aa_state_spin_speed", stateSpinSpeed)
+    reg("aa_state_madness_period", stateMadnessPeriod)
+    reg("aa_state_madness_pitch_min", stateMadnessPitchMin)
+    reg("aa_state_madness_pitch_max", stateMadnessPitchMax)
+    reg("aa_state_madness_yaw_range", stateMadnessYawRange)
+    reg("aa_state_madness_desync", stateMadnessDesync)
+    reg("aa_state_upper_body_chaos", stateUpperBodyChaos)
+    reg("aa_state_body_chaos_strength", stateBodyChaosStrength)
+    reg("aa_state_disable_fake_lag", stateDisableFakeLag)
+
+    local standingProfile = { amplitude = standing, steps = { -1, -0.48, 0.48, 1 }, minTicks = 3, maxTicks = 5 }
+    local movingProfile = { amplitude = moving, steps = { -1, 0, 1 }, minTicks = 2, maxTicks = 3 }
+    local airProfile = { amplitude = airborne, steps = { -1, -0.35, 0.7, 1 }, minTicks = 2, maxTicks = 4 }
+    local crouchProfile = { amplitude = crouching, steps = { -1, -0.2, 0.65 }, minTicks = 3, maxTicks = 6 }
+
+    local stepIndex = 0
+    local nextSwitch
+    local previousProfile
+    local yawOffset = 0
+    local inverted = false
+    local active = false
+    local lastHealth
+    local holdSideUntil = 0
+    local running
+    local transitionSince
+    local stateSpinStartedAt = 0
+    local madnessStep = 0
+    
+    -- Phantom Head State
+    local headSide = 1
+    local lastHeadSwitch = 0
+
+    local madnessVisual = {
+        neck_pitch = 0, neck_yaw = 0, neck_roll = 0,
+        waist_pitch = 0, waist_yaw = 0, waist_roll = 0,
+        left_shoulder_pitch = 0, left_shoulder_yaw = 0, left_shoulder_roll = 0,
+        right_shoulder_pitch = 0, right_shoulder_yaw = 0, right_shoulder_roll = 0
+    }
+    local madnessCharacter, madnessNeck, madnessWaist, madnessLeftShoulder, madnessRightShoulder
+    local madnessBodyApplied = false
+
+    local function groundProfile(info)
+        local speed = info.speed
+        local movingNow = info.state == "Run"
+        if type(speed) == "number" then
+            local threshold = running and 1.5 or 2.5
+            movingNow = speed > threshold
+        end
+        if running == nil or movingNow == running then
+            running = movingNow
+            transitionSince = nil
+        else
+            local now = globals.realtime()
+            transitionSince = transitionSince or now
+            if now - transitionSince >= 0.08 then
+                running = movingNow
+                transitionSince = nil
+            end
+        end
+        return running and movingProfile or standingProfile
+    end
+
+    local function getStateGroup(info)
+        local state = string.lower(tostring(info.state or ""))
+        if info.is_in_air or state:find("jump", 1, true) or state:find("air", 1, true) then return "air" end
+        if info.is_crouching or state:find("duck", 1, true) or state:find("crouch", 1, true) then return "duck" end
+        if state:find("run", 1, true) or state:find("move", 1, true) or state:find("walk", 1, true) or (info.speed or 0) > 5 then return "run" end
+        if state == "" or state == "unknown" then return nil end
+        return "stand"
+    end
+
+    local function shouldUseStateOverride(info)
+        if not stateEnabled:get() then return false end
+        local group = getStateGroup(info)
+        if group == "air" then return stateOnAir:get()
+        elseif group == "duck" then return stateOnDuck:get()
+        elseif group == "run" then return stateOnRun:get()
+        elseif group == "stand" then return stateOnStand:get() end
+        return false
+    end
+
+    local function findCharacterMotor(character, name)
+        if character == nil then return nil end
+        local motor = character:FindFirstChild(name, true)
+        if motor ~= nil and motor:IsA("Motor6D") then return motor end
+        return nil
+    end
+
+    local function refreshMadnessCharacter()
+        local player = call_or(nil, entity.get_local_player)
+        local character = player and player.Character or nil
+        if character ~= madnessCharacter then
+            if madnessBodyApplied then
+                if madnessNeck and madnessNeck.Parent then madnessNeck.Transform = CFrame.new() end
+                if madnessWaist and madnessWaist.Parent then madnessWaist.Transform = CFrame.new() end
+                if madnessLeftShoulder and madnessLeftShoulder.Parent then madnessLeftShoulder.Transform = CFrame.new() end
+                if madnessRightShoulder and madnessRightShoulder.Parent then madnessRightShoulder.Transform = CFrame.new() end
+            end
+            madnessBodyApplied = false
+            madnessCharacter = character
+            madnessNeck = findCharacterMotor(character, "Neck")
+            madnessWaist = findCharacterMotor(character, "Waist")
+            madnessLeftShoulder = findCharacterMotor(character, "LeftShoulder") or findCharacterMotor(character, "Left Shoulder")
+            madnessRightShoulder = findCharacterMotor(character, "RightShoulder") or findCharacterMotor(character, "Right Shoulder")
+        end
+    end
+
+    local function updateMadnessVisual(step)
+        local strength = clamp(stateBodyChaosStrength:get(), 0, 89)
+        madnessVisual.neck_pitch = deterministic_between(step + 101, -strength, strength)
+        madnessVisual.neck_yaw = deterministic_between(step + 211, -strength, strength)
+        madnessVisual.neck_roll = deterministic_between(step + 307, -strength * 0.75, strength * 0.75)
+        madnessVisual.waist_pitch = deterministic_between(step + 401, -strength * 0.45, strength * 0.45)
+        madnessVisual.waist_yaw = deterministic_between(step + 503, -strength * 0.55, strength * 0.55)
+        madnessVisual.waist_roll = deterministic_between(step + 607, -strength * 0.35, strength * 0.35)
+        madnessVisual.left_shoulder_pitch = deterministic_between(step + 701, -strength, strength)
+        madnessVisual.left_shoulder_yaw = deterministic_between(step + 809, -strength * 0.7, strength * 0.7)
+        madnessVisual.left_shoulder_roll = deterministic_between(step + 907, -strength, strength)
+        madnessVisual.right_shoulder_pitch = deterministic_between(step + 1009, -strength, strength)
+        madnessVisual.right_shoulder_yaw = deterministic_between(step + 1103, -strength * 0.7, strength * 0.7)
+        madnessVisual.right_shoulder_roll = deterministic_between(step + 1201, -strength, strength)
+    end
+
+    local function renderMadnessBody()
+        local activeMadness = enabled:get()
+            and stateEnabled:get()
+            and stateMode:get() == "Madness"
+            and stateUpperBodyChaos:get()
+        if not activeMadness then
+            if madnessBodyApplied then
+                if madnessNeck and madnessNeck.Parent then madnessNeck.Transform = CFrame.new() end
+                if madnessWaist and madnessWaist.Parent then madnessWaist.Transform = CFrame.new() end
+                if madnessLeftShoulder and madnessLeftShoulder.Parent then madnessLeftShoulder.Transform = CFrame.new() end
+                if madnessRightShoulder and madnessRightShoulder.Parent then madnessRightShoulder.Transform = CFrame.new() end
+            end
+            madnessBodyApplied = false
+            return
+        end
+
+        refreshMadnessCharacter()
+        local applied = false
+        if madnessNeck and madnessNeck.Parent then
+            madnessNeck.Transform = CFrame.Angles(math.rad(madnessVisual.neck_pitch), math.rad(madnessVisual.neck_yaw), math.rad(madnessVisual.neck_roll))
+            applied = true
+        end
+        if madnessWaist and madnessWaist.Parent then
+            madnessWaist.Transform = CFrame.Angles(math.rad(madnessVisual.waist_pitch), math.rad(madnessVisual.waist_yaw), math.rad(madnessVisual.waist_roll))
+            applied = true
+        end
+        if madnessLeftShoulder and madnessLeftShoulder.Parent then
+            madnessLeftShoulder.Transform = CFrame.Angles(math.rad(madnessVisual.left_shoulder_pitch), math.rad(madnessVisual.left_shoulder_yaw), math.rad(madnessVisual.left_shoulder_roll))
+            applied = true
+        end
+        if madnessRightShoulder and madnessRightShoulder.Parent then
+            madnessRightShoulder.Transform = CFrame.Angles(math.rad(madnessVisual.right_shoulder_pitch), math.rad(madnessVisual.right_shoulder_yaw), math.rad(madnessVisual.right_shoulder_roll))
+            applied = true
+        end
+        madnessBodyApplied = applied
+    end
+
+    local function getPitchOverride(tick)
+        local selected = pitch:get()
+        if selected == "Custom" then return clamp(customPitch:get(), -89, 89) end
+        if selected ~= "Jitter" and selected ~= "Mega" then return selected end
+        local a = clamp(standing:get(), -89, 89)
+        local b = clamp(moving:get(), -89, 89)
+        local step = math.floor((tick or globals.tickcount()) / 2)
+        if selected == "Jitter" then
+            return step % 2 == 0 and a or b
+        end
+        local seq = parse_sequence_or_default("A,B,0,-A,R,-B", -89, 89, { A = true, B = true, ["-A"] = true, ["-B"] = true, R = true, RANDOM = true }, "A,B,0,-A,R,-B")
+        local token = sample_timed_sequence(seq, step)
+        if type(token) == "number" then return clamp(token, -89, 89) end
+        if token == "A" then return a end
+        if token == "B" then return b end
+        if token == "-A" then return clamp(-a, -89, 89) end
+        if token == "-B" then return clamp(-b, -89, 89) end
+        if token == "R" or token == "RANDOM" then return deterministic_between(step, a, b) end
+        return 0
+    end
+
+    local function yawModifier()
+        return yawOffset
+    end
+
+    local function release()
+        if not active then return end
+        local manual = aa.get_manual and aa.get_manual()
+        aa.reset()
+        if manual and aa.set_manual and aa.get_manual() ~= manual then
+            aa.set_manual(manual)
+        end
+        running, transitionSince = nil, nil
+        lastHealth, holdSideUntil = nil, 0
+        active = false
+        nextSwitch = nil
+        previousProfile = nil
+        stepIndex = 0
+    end
+
+    local function update(tick)
+        if not enabled:get() or (aa.is_manual and aa.is_manual()) then
+            release()
+            return
+        end
+
+        local player = entity.get_local_player()
+        local info = player and entity.get_info(player)
+        if not info or not info.is_alive then
+            release()
+            return
+        end
+
+        if type(tick) ~= "number" then tick = globals.tickcount() end
+        local now = globals.realtime()
+
+        -- ============================================================
+        -- PHANTOM HEAD LOGIC (Priority)
+        -- ============================================================
+        if phantomHeadEnabled:get() then
+            if autoSideSwitch:get() then
+                local delay = switchTimer:get() / 64
+                if now - lastHeadSwitch >= delay then
+                    headSide = -headSide
+                    lastHeadSwitch = now
+                end
+            elseif invertKey:get() then
+                headSide = -headSide
+            end
+
+            aa.override_body_yaw(false)
+            aa.override_desync_limits(0, 0)
+            aa.override_desync(0, 0)
+
+            aa.override_pitch("Down")
+
+            local target_angle = headAngle:get() * headSide
+            aa.override_yaw_modifier(function()
+                return target_angle
+            end)
+
+            if fakeLagEnabled:get() then
+                aa.override_fake_lag(true)
+                aa.override_fake_lag_limit(fakeLagTicks:get())
+                aa.override_fake_lag_variability(15)
+            end
+
+            active = true
+            renderMadnessBody()
+            return
+        end
+
+        -- ============================================================
+        -- NORMAL AA LOGIC
+        -- ============================================================
+        local overrideActive = shouldUseStateOverride(info)
+        if overrideActive then
+            local mode = stateMode:get()
+            if mode == "Madness" then
+                madnessStep = madnessStep + 1
+                local period = math.max(1, math.floor(stateMadnessPeriod:get()))
+                if madnessStep % period == 0 then
+                    updateMadnessVisual(math.floor(now * 10))
+                end
+                local pitchMin = clamp(stateMadnessPitchMin:get(), -89, 89)
+                local pitchMax = clamp(stateMadnessPitchMax:get(), -89, 89)
+                local yawRange = clamp(stateMadnessYawRange:get(), 0, 180)
+                yawOffset = deterministic_between(madnessStep + 77, -yawRange, yawRange)
+                active = true
+                aa.override_pitch(deterministic_between(madnessStep + 88, pitchMin, pitchMax))
+                aa.override_yaw(180, "camera")
+                aa.override_yaw_modifier(yawModifier)
+                local limit = stateMadnessDesync:get() and desync:get() or 0
+                aa.override_body_yaw(limit > 0)
+                if limit > 0 then
+                    aa.override_desync_limits(limit, limit)
+                    aa.override_inverter(deterministic_unit(madnessStep) > 0.5)
+                end
+            else
+                if stateSpinStartedAt == 0 then stateSpinStartedAt = now end
+                local direction = stateSpinDirection:get() == "Left" and -1 or 1
+                local elapsed = now - stateSpinStartedAt
+                yawOffset = normalized_angle(elapsed * stateSpinSpeed:get() * direction + stateYawOffset:get())
+                active = true
+                aa.override_pitch(statePitch:get())
+                aa.override_yaw(180, "camera")
+                aa.override_yaw_modifier(yawModifier)
+                local limit = desync:get()
+                aa.override_body_yaw(limit > 0)
+                if limit > 0 then
+                    aa.override_desync_limits(limit, limit)
+                    aa.override_inverter(inverted)
+                end
+            end
+        else
+            stateSpinStartedAt = 0
+            local profile = standingProfile
+            if info.is_in_air or info.state == "Jumping" then
+                profile = airProfile
+            elseif info.is_crouching or info.state == "Duck" then
+                profile = crouchProfile
+            else
+                profile = groundProfile(info)
+            end
+            if profile == airProfile or profile == crouchProfile then
+                running, transitionSince = nil, nil
+            end
+
+            local steps = profile.steps
+            local health = info.health
+            local damaged = type(health) == "number" and lastHealth ~= nil and health < lastHealth
+            lastHealth = type(health) == "number" and health or nil
+            if not reactToDamage:get() then holdSideUntil = 0 end
+
+            if damaged and reactToDamage:get() and now >= holdSideUntil then
+                stepIndex = yawOffset >= 0 and 1 or #steps
+                inverted = not inverted
+                holdSideUntil = now + math.random(20, 35) / 100
+                nextSwitch = tick + profile.minTicks
+                previousProfile = profile
+            elseif not nextSwitch or tick >= nextSwitch or nextSwitch - tick > profile.maxTicks or profile ~= previousProfile then
+                if profile ~= previousProfile or stepIndex == 0 then
+                    stepIndex = math.random(1, #steps)
+                else
+                    local choice = math.random(1, #steps - 1)
+                    stepIndex = choice < stepIndex and choice or choice + 1
+                end
+                if now >= holdSideUntil and autoInvert:get() then
+                    if math.random(0, math.max(1, math.floor(invertInterval:get()))) == 0 then
+                        inverted = not inverted
+                    end
+                end
+                nextSwitch = tick + math.random(profile.minTicks, profile.maxTicks)
+                previousProfile = profile
+            end
+
+            yawOffset = steps[stepIndex] * profile.amplitude:get()
+            local limit = desync:get()
+            active = true
+            aa.override_pitch(getPitchOverride(tick))
+            aa.override_yaw(180, "camera")
+            aa.override_yaw_modifier(yawModifier)
+            aa.override_body_yaw(limit > 0)
+            if limit > 0 then
+                aa.override_desync_limits(limit, limit)
+                aa.override_inverter(inverted)
+            end
+        end
+
+        renderMadnessBody()
+    end
+
+    return update, release
+end
+
+-- ============================================================
+-- RESOLVER (multiple modes)
+-- ============================================================
+local function setupResolver(section)
+    local enabled = section:new_toggle("Enable resolver", true)
+    local mode = section:new_combobox("Resolver mode", { "penablox", "bruteforce", "freestand", "hybrid" }, "hybrid")
+    local offsets = { 58, -58, 0, 86, -86, 29, -29 }
+    local players = {}
+    local targets = {}
+    local targetsByUserId = {}
+    local shots = {}
+    local bursts = {}
+    local brute = {}
+    local lastDecision = "No completed shots yet."
+
+    reg("resolver_enabled", enabled)
+    reg("resolver_mode", mode)
+
+    section:new_button("Explain last burst", function()
+        print("[Resolver] " .. lastDecision)
+        notify("Resolver", lastDecision, 5, false)
+    end)
+
+    local active = false
+
+    local function restorePlayer(state)
+        if state.originalForce == nil and state.originalOffset == nil then return end
+        plist.set(state.player, "Override yaw offset", state.originalOffset or 0)
+        plist.set(state.player, "Force body yaw", state.originalForce == true)
+        state.originalForce = nil
+        state.originalOffset = nil
+    end
+
+    local function stop()
+        if not active then return end
+        for _, state in pairs(players) do restorePlayer(state) end
+        players = {}
+        targets = {}
+        targetsByUserId = {}
+        shots = {}
+        bursts = {}
+        brute = {}
+        lastDecision = "No completed shots yet."
+        active = false
+    end
+
+    local function recentScore(stance, index, now)
+        local entry = stance.scores[index]
+        if not entry then return 0 end
+        return entry.value * 0.5 ^ (math.max(0, now - entry.time) / 12)
+    end
+
+    local function measuredDelta(enemy)
+        if not entity.get_player_lby_deg or not entity.get_player_angles_deg then return nil end
+        local _, eye = entity.get_player_angles_deg(enemy)
+        local feet = entity.get_player_lby_deg(enemy)
+        if type(eye) ~= "number" or type(feet) ~= "number" then return nil end
+        return normalized_angle(feet - eye)
+    end
+
+    local function nearestAngle(delta)
+        local best = 1
+        for index, angle in ipairs(offsets) do
+            if math.abs(angle - delta) < math.abs(offsets[best] - delta) then best = index end
+        end
+        return best
+    end
+
+    local function selectAlternative(stance, now)
+        local bestIndex, bestScore
+        for step = 1, #offsets - 1 do
+            local index = (stance.index - 1 + step) % #offsets + 1
+            local score = recentScore(stance, index, now)
+            if bestScore == nil or score > bestScore then
+                bestScore = score
+                bestIndex = index
+            end
+        end
+        stance.index = bestIndex or stance.index
+        stance.misses = 0
+        stance.revision = stance.revision + 1
+    end
+
+    local function finishBurst(burst, now)
+        local stance = burst.stance
+        local weight = 0
+        if burst.head or burst.hit then
+            weight = burst.head and 1.25 or 0.5
+        elseif burst.pending == 0 and burst.resolverMiss then
+            weight = -1
+        end
+
+        local score = recentScore(stance, burst.index, now)
+        local action = "ignored"
+        if weight ~= 0 then
+            local age = math.max(0, now - burst.time)
+            stance.scores[burst.index] = {
+                value = math.max(-3, math.min(3, score + weight * 0.5 ^ (age / 12))),
+                time = now,
+            }
+            if stance.revision ~= burst.revision then
+                action = "past angle scored"
+            elseif weight > 0 then
+                stance.misses = 0
+                action = "kept"
+            else
+                stance.misses = stance.misses + 1
+                if score < 0.9 or stance.misses >= 2 then
+                    selectAlternative(stance, now)
+                    action = "switched"
+                else
+                    action = "kept after earlier hits"
+                end
+            end
+        end
+        local outcomes = {}
+        for i, id in ipairs(burst.ids) do
+            local shot = shots[id]
+            outcomes[i] = shot and (shot.outcome or "no result") or "no result"
+        end
+        lastDecision = string.format("%s | %s | %s | %d -> %d deg | %s",
+            burst.name, burst.pose, table.concat(outcomes, " + "), offsets[burst.index], offsets[stance.index], action)
+        if stance.openBurst == burst then stance.openBurst = nil end
+        for _, id in ipairs(burst.ids) do shots[id] = nil end
+    end
+
+    local function settleBursts(now)
+        if #bursts == 0 then return end
+        local waiting = {}
+        local blocked = {}
+        for _, burst in ipairs(bursts) do
+            local age = now - burst.time
+            local closed = #burst.ids == 2 or age > 0.15
+            if not blocked[burst.stance] and closed and (burst.pending == 0 or age > 2) then
+                finishBurst(burst, now)
+            else
+                blocked[burst.stance] = true
+                waiting[#waiting + 1] = burst
+            end
+        end
+        bursts = waiting
+    end
+
+    local function detectFreestand(enemy)
+        local anim = call_or(nil, entity.get_anim_state, enemy)
+        if anim == nil then return "center" end
+        local eye = tonumber(anim.eye_angles_y)
+        local feet = tonumber(anim.goal_feet_yaw)
+        if eye == nil or feet == nil then return "center" end
+        local delta = normalized_angle(feet - eye)
+        if delta > 10 then return "left" elseif delta < -10 then return "right" end
+        return "center"
+    end
+
+    local function getBruteState(enemy)
+        local key = enemy.UserId or enemy
+        local state = brute[key]
+        if not state then
+            state = { index = 1, misses = 0 }
+            brute[key] = state
+        end
+        return state
+    end
+
+    local function bruteOffset(enemy, info)
+        local state = getBruteState(enemy)
+        local delta = measuredDelta(enemy)
+        if delta and state.misses == 0 then
+            state.index = nearestAngle(delta)
+        end
+        return offsets[state.index]
+    end
+
+    local function freestandOffset(enemy)
+        local side = detectFreestand(enemy)
+        if side == "left" then return offsets[1] elseif side == "right" then return offsets[2] end
+        return offsets[3]
+    end
+
+    local function update()
+        if not enabled:get() then stop(); return end
+        active = true
+
+        local now = globals.realtime()
+        settleBursts(now)
+
+        targets = {}
+        targetsByUserId = {}
+        local present = {}
+        for _, enemy in ipairs(entity.get_enemies()) do
+            local key = enemy.UserId or enemy
+            present[key] = true
+
+            local state = players[key]
+            if not state then
+                state = { stances = {} }
+                players[key] = state
+            end
+            state.player = enemy
+
+            local info = entity.get_info(enemy)
+            if info and info.is_alive then
+                local name = info.state or "Stand"
+                local stance = state.stances[name]
+                local delta = measuredDelta(enemy)
+                if not stance then
+                    stance = {
+                        index = delta and nearestAngle(delta) or 3,
+                        revision = 0,
+                        scores = {},
+                        misses = 0,
+                        playerName = tostring(info.name or key),
+                        pose = name,
+                        baseline = delta
+                    }
+                    state.stances[name] = stance
+                end
+
+                if state.lastPose ~= name then stance.candidate = nil end
+                state.lastPose = name
+                if delta then
+                    stance.baseline = stance.baseline or delta
+                    local distance = math.abs(normalized_angle(delta - stance.baseline))
+                    if distance < 24 then
+                        stance.candidate = nil
+                    elseif not stance.candidate or math.abs(normalized_angle(delta - stance.candidate)) > 12 then
+                        stance.candidate = delta
+                        stance.since = now
+                        stance.samples = 1
+                    else
+                        stance.samples = stance.samples + 1
+                        if stance.samples >= 5 and now - stance.since >= 0.14 then
+                            stance = {
+                                index = nearestAngle(delta),
+                                revision = stance.revision + 1,
+                                scores = {},
+                                misses = 0,
+                                playerName = stance.playerName,
+                                pose = name,
+                                baseline = delta
+                            }
+                            state.stances[name] = stance
+                        end
+                    end
+                else
+                    stance.candidate = nil
+                end
+
+                local applied = { stance = stance, index = stance.index, revision = stance.revision }
+                targets[enemy] = applied
+                targetsByUserId[key] = applied
+                if entity.get_player_slot then
+                    local slot = entity.get_player_slot(enemy)
+                    if slot ~= nil then targets[slot] = applied end
+                end
+
+                if state.originalForce == nil and state.originalOffset == nil then
+                    state.originalForce = plist.get(enemy, "Force body yaw") == true
+                    state.originalOffset = plist.get(enemy, "Override yaw offset") or 0
+                end
+
+                local selectedMode = mode:get()
+                local offset
+                if selectedMode == "bruteforce" then
+                    offset = bruteOffset(enemy, info)
+                elseif selectedMode == "freestand" then
+                    offset = freestandOffset(enemy)
+                elseif selectedMode == "hybrid" then
+                    local bruteState = getBruteState(enemy)
+                    if stance.misses >= 2 or bruteState.misses >= 1 then
+                        offset = bruteOffset(enemy, info)
+                    else
+                        offset = offsets[stance.index]
+                    end
+                else
+                    offset = offsets[stance.index]
+                end
+
+                plist.set(enemy, "Force body yaw", true)
+                plist.set(enemy, "Override yaw offset", offset)
+            else
+                state.lastPose = nil
+                restorePlayer(state)
+            end
+        end
+
+        for key, state in pairs(players) do
+            if not present[key] then
+                if state.player and state.player.Parent then restorePlayer(state) end
+                players[key] = nil
+            end
+        end
+    end
+
+    client.set_event_callback("aim_fire", function(event)
+        if type(event) == "table" and event.id ~= nil and shots[event.id] then return end
+        if not active or not enabled:get() or type(event) ~= "table" or event.id == nil then return end
+
+        local applied = targets[event.target] or targetsByUserId[event.target]
+        if not applied and typeof(event.target) == "Instance" then
+            applied = targetsByUserId[event.target.UserId]
+        end
+        if not applied then return end
+
+        local now = globals.realtime()
+        local stance = applied.stance
+        local burst = stance.openBurst
+        if not burst or burst.revision ~= applied.revision or now - burst.time > 0.15 or #burst.ids >= 2 then
+            burst = {
+                stance = stance,
+                index = applied.index,
+                revision = applied.revision,
+                name = stance.playerName,
+                pose = stance.pose,
+                time = now,
+                ids = {},
+                pending = 0
+            }
+            bursts[#bursts + 1] = burst
+            stance.openBurst = burst
+        end
+        burst.ids[#burst.ids + 1] = event.id
+        burst.pending = burst.pending + 1
+        shots[event.id] = { burst = burst, target = event.target, mode = mode:get() }
+    end)
+
+    local function scoreShot(event, hit)
+        if not active or not enabled:get() or type(event) ~= "table" or event.id == nil then return end
+        local shot = shots[event.id]
+        if not shot or shot.done then return end
+        shot.done = true
+        local burst = shot.burst
+        burst.pending = burst.pending - 1
+        if hit then
+            shot.outcome = tostring(event.hitbox or "body") .. " hit"
+            burst.hit = true
+            if string.lower(tostring(event.hitbox)) == "head" then burst.head = true end
+            local bruteState = shot.target and getBruteState(shot.target)
+            if bruteState then bruteState.misses = 0 end
+        else
+            shot.outcome = tostring(event.reason or "unknown") .. " miss"
+            if event.reason == "resolver" then burst.resolverMiss = true end
+            local bruteState = shot.target and getBruteState(shot.target)
+            if bruteState then
+                bruteState.misses = bruteState.misses + 1
+                if shot.mode == "bruteforce" or shot.mode == "hybrid" then
+                    bruteState.index = bruteState.index % #offsets + 1
+                end
+            end
+        end
+    end
+
+    client.set_event_callback("aim_hit", function(event) scoreShot(event, true) end)
+    client.set_event_callback("aim_miss", function(event) scoreShot(event, false) end)
+
+    return update, stop
+end
+
+-- ============================================================
+-- PEEK COACH
+-- ============================================================
+local function setupPeekCoach(section)
+    local enabled = section:new_toggle("Peek Coach", true)
+    local previous, armed, stoppedAt
+
+    local function update()
+        local player = entity.get_local_player()
+        if not enabled:get() or not player or not entity.is_alive(player) then
+            previous, armed, stoppedAt = nil, false, nil
+            return
+        end
+        local gun = weapon.get_active(player)
+        if not gun or type(gun.ammo) ~= "number" or not gun.max_ammo or gun.max_ammo <= 0 then
+            previous, armed, stoppedAt = nil, false, nil
+            return
+        end
+
+        local now = globals.realtime()
+        local speed = movement.get_speed(player, false)
+        local moving = speed > 2.5 or (previous and previous.moving and speed > 1.5)
+        local id = gun.id or gun.name
+        if not previous or previous.id ~= id or gun.is_reloading or previous.reloading or gun.ammo > previous.ammo then
+            armed, stoppedAt = moving and not gun.is_reloading, nil
+        else
+            if moving and not previous.moving then armed, stoppedAt = true, nil end
+            if previous.moving and not moving then stoppedAt = now end
+            if stoppedAt and now - stoppedAt > 2 then armed = false end
+            if armed and gun.ammo < previous.ammo then
+                local timing
+                if moving then
+                    timing = string.format("moving %.1f studs/s", speed)
+                elseif stoppedAt then
+                    timing = string.format("%d ms after stop", math.floor((now - stoppedAt) * 1000 + 0.5))
+                end
+                if timing then
+                    local message = tostring(gun.name or id) .. " | " .. timing
+                    if type(previous.inaccuracy) == "number" then
+                        message = message .. string.format(" | inaccuracy %.3f", previous.inaccuracy)
+                    end
+                    notify("Peek Coach", message, 3, false)
+                end
+                armed = false
+            end
+        end
+        previous = {
+            id = id,
+            ammo = gun.ammo,
+            reloading = gun.is_reloading,
+            moving = moving,
+            inaccuracy = weapon.get_inaccuracy(player)
+        }
+    end
+    return update
+end
+
+-- ============================================================
+-- BUILD SECTIONS
+-- ============================================================
+local updateResolver, stopResolver = setupResolver(tab_main:new_section("Resolver", "Left"))
+
+local updateAntiAim, stopAntiAim = setupAntiAim(
+    tab_aa:new_section("Main AA", "Left"),
+    tab_aa:new_section("Phantom Head & Lag", "Right")
+)
+
+local updatePeekCoach = setupPeekCoach(tab_practice:new_section("Practice", "Left"))
+
+local configSection = tab_config:new_section("Config", "Left")
+configSection:new_button("Save config", function() save_config() end)
+configSection:new_button("Load config", function() load_config() end)
+configSection:new_button("Reset config", function()
+    apply_config_values(DEFAULT_PRESET)
+    save_config()
+end)
+
+load_config()
+
+-- ============================================================
+-- MAIN TICK
+-- ============================================================
+events.on_tick(function(tick)
+    updateAntiAim(tick)
+    updateResolver()
+    updatePeekCoach()
+end)
+
+client.set_event_callback("shutdown", function()
+    stopAntiAim()
+    stopResolver()
+end)
+
+sounds.override_hitsound(hitSoundId, 1, 1)
+sounds.play(hitSoundId, 1, 1)
