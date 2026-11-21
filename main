@@ -998,6 +998,7 @@ local updateAntiAim, stopAntiAim = setupAntiAim(
 
 local updatePeekCoach = setupPeekCoach(tab_practice:new_section("Practice", "Left"))
 
+
 local configSection = tab_config:new_section("Config", "Left")
 configSection:new_button("Save config", function() save_config() end)
 configSection:new_button("Load config", function() load_config() end)
@@ -1024,3 +1025,199 @@ end)
 
 sounds.override_hitsound(hitSoundId, 1, 1)
 sounds.play(hitSoundId, 1, 1)
+
+-- ============================================================
+-- INTRO (plays once when the lua is injected)
+-- ============================================================
+-- Upload intro.webm to the same GitHub repo as this script.
+local INTRO_URL = "https://raw.githubusercontent.com/lognula/1488-BETA-/main/intro.webm"
+local INTRO_FILE = "btc_intro.webm"
+local INTRO_ROBLOX_ID = ""  -- optional: "rbxassetid://..." if the video is uploaded to Roblox
+local INTRO_TITLE = "B T C (BETA)"
+local INTRO_HIGHLIGHT_FROM = 7  -- characters from here on are purple: "(BETA)"
+local INTRO_SUBTITLE = "by hvh.energy"
+
+local function playIntro()
+    local Players = game:GetService("Players")
+    local TweenService = game:GetService("TweenService")
+    local TextService = game:GetService("TextService")
+    local waitFor = (task and task.wait) or wait
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "BTCIntro"
+    gui.IgnoreGuiInset = true
+    gui.ResetOnSpawn = false
+    gui.DisplayOrder = 999999
+    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    local parented = false
+    if gethui then parented = pcall(function() gui.Parent = gethui() end) end
+    if not parented then parented = pcall(function() gui.Parent = game:GetService("CoreGui") end) end
+    if not parented then gui.Parent = Players.LocalPlayer:WaitForChild("PlayerGui") end
+
+    local function tween(obj, time, props, style)
+        local t = TweenService:Create(obj,
+            TweenInfo.new(time, style or Enum.EasingStyle.Quart, Enum.EasingDirection.Out), props)
+        t:Play()
+        return t
+    end
+
+    local backdrop = Instance.new("Frame")
+    backdrop.Size = UDim2.fromScale(1, 1)
+    backdrop.BackgroundColor3 = Color3.fromRGB(6, 4, 14)
+    backdrop.BackgroundTransparency = 1
+    backdrop.BorderSizePixel = 0
+    backdrop.Parent = gui
+
+    tween(backdrop, 0.35, { BackgroundTransparency = 0.05 })
+    waitFor(0.35)
+
+    -- 1) the real video: Roblox asset id, or the webm from GitHub via getcustomasset
+    local asset = INTRO_ROBLOX_ID ~= "" and INTRO_ROBLOX_ID or nil
+    if not asset then
+        local getAsset = getcustomasset or getsynasset
+        if getAsset and writefile then
+            pcall(function()
+                if not (isfile and isfile(INTRO_FILE)) then
+                    writefile(INTRO_FILE, game:HttpGet(INTRO_URL))
+                end
+                asset = getAsset(INTRO_FILE)
+            end)
+        end
+    end
+
+    local played = false
+    if asset then
+        pcall(function()
+            local video = Instance.new("VideoFrame")
+            video.AnchorPoint = Vector2.new(0.5, 0.5)
+            video.Position = UDim2.fromScale(0.5, 0.5)
+            video.Size = UDim2.fromScale(1, 1)
+            video.BackgroundTransparency = 1
+            video.Looped = false
+            video.Video = asset
+            local ratio = Instance.new("UIAspectRatioConstraint")
+            ratio.AspectRatio = 16 / 9
+            ratio.Parent = video
+            video.Parent = backdrop
+
+            local started = os.clock()
+            while not video.IsLoaded and os.clock() - started < 5 do waitFor(0.05) end
+            if video.IsLoaded then
+                video:Play()
+                played = true
+                local length = (video.TimeLength and video.TimeLength > 0) and video.TimeLength or 3.5
+                local playStart = os.clock()
+                while os.clock() - playStart < length + 0.1 do waitFor(0.05) end
+            end
+            video:Destroy()
+        end)
+    end
+
+    -- 2) fallback: the same animation built from GUI text
+    if not played then
+        local camera = workspace.CurrentCamera
+        local holder = Instance.new("Frame")
+        holder.AnchorPoint = Vector2.new(0.5, 0.5)
+        holder.Position = UDim2.fromScale(0.5, 0.47)
+        holder.Size = UDim2.fromOffset(1200, 260)
+        holder.BackgroundTransparency = 1
+        holder.Parent = backdrop
+        local scale = Instance.new("UIScale")
+        scale.Scale = camera and math.clamp(camera.ViewportSize.Y / 1080, 0.5, 2) or 1
+        scale.Parent = holder
+
+        local FONT, SIZE = Enum.Font.GothamBlack, 110
+        local chars, widths, total = {}, {}, 0
+        for i = 1, #INTRO_TITLE do
+            local ch = INTRO_TITLE:sub(i, i)
+            local w = TextService:GetTextSize(ch, SIZE, FONT, Vector2.new(1000, 1000)).X
+            if ch == " " then w = SIZE * 0.28 end
+            chars[i], widths[i] = ch, w
+            total = total + w
+        end
+
+        local purpleA, purpleB = Color3.fromRGB(125, 107, 255), Color3.fromRGB(196, 92, 255)
+        local labels = {}
+        local x = 600 - total / 2
+        for i, ch in ipairs(chars) do
+            if ch ~= " " then
+                local purple = i >= INTRO_HIGHLIGHT_FROM
+                local k = purple and (i - INTRO_HIGHLIGHT_FROM) / math.max(1, #chars - INTRO_HIGHLIGHT_FROM) or 0
+                local label = Instance.new("TextLabel")
+                label.BackgroundTransparency = 1
+                label.Font = FONT
+                label.TextSize = SIZE
+                label.Text = ch
+                label.TextColor3 = purple and purpleA:Lerp(purpleB, k) or Color3.new(1, 1, 1)
+                label.TextTransparency = 1
+                label.Size = UDim2.fromOffset(widths[i], 140)
+                label.Position = UDim2.fromOffset(x, 75)
+                label.Parent = holder
+                local stroke = Instance.new("UIStroke")
+                stroke.Color = Color3.fromRGB(150, 100, 255)
+                stroke.Thickness = 2
+                stroke.Transparency = 1
+                stroke.Parent = label
+                labels[#labels + 1] = { label = label, stroke = stroke, x = x, glow = purple and 0.35 or 0.7 }
+            end
+            x = x + widths[i]
+        end
+
+        local line = Instance.new("Frame")
+        line.AnchorPoint = Vector2.new(0.5, 0)
+        line.Position = UDim2.fromOffset(600, 182)
+        line.Size = UDim2.fromOffset(0, 3)
+        line.BorderSizePixel = 0
+        line.BackgroundColor3 = Color3.fromRGB(180, 110, 255)
+        line.Parent = holder
+        local lineGradient = Instance.new("UIGradient")
+        lineGradient.Transparency = NumberSequence.new({
+            NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0), NumberSequenceKeypoint.new(1, 1),
+        })
+        lineGradient.Parent = line
+
+        local subtitle = Instance.new("TextLabel")
+        subtitle.AnchorPoint = Vector2.new(0.5, 0)
+        subtitle.BackgroundTransparency = 1
+        subtitle.Font = Enum.Font.GothamMedium
+        subtitle.TextSize = 32
+        subtitle.Text = INTRO_SUBTITLE
+        subtitle.TextColor3 = Color3.fromRGB(235, 235, 245)
+        subtitle.TextTransparency = 1
+        subtitle.Size = UDim2.fromOffset(600, 40)
+        subtitle.Position = UDim2.fromOffset(600, 215)
+        subtitle.Parent = holder
+
+        -- letters rise in one by one
+        for _, item in ipairs(labels) do
+            tween(item.label, 0.55, { TextTransparency = 0, Position = UDim2.fromOffset(item.x, 40) })
+            tween(item.stroke, 0.55, { Transparency = item.glow })
+            waitFor(0.075)
+        end
+        waitFor(0.3)
+        tween(line, 0.6, { Size = UDim2.fromOffset(300, 3) })
+        waitFor(0.2)
+        tween(subtitle, 0.7, { TextTransparency = 0.1, Position = UDim2.fromOffset(600, 200) })
+        waitFor(1.6)
+
+        -- fade out with a slight zoom
+        tween(scale, 0.45, { Scale = scale.Scale * 1.06 })
+        for _, item in ipairs(labels) do
+            tween(item.label, 0.45, { TextTransparency = 1 })
+            tween(item.stroke, 0.45, { Transparency = 1 })
+        end
+        tween(line, 0.45, { BackgroundTransparency = 1 })
+        tween(subtitle, 0.45, { TextTransparency = 1 })
+        waitFor(0.45)
+    end
+
+    tween(backdrop, 0.5, { BackgroundTransparency = 1 })
+    waitFor(0.55)
+    gui:Destroy()
+end
+
+local spawnIntro = (task and task.spawn) or function(f) coroutine.wrap(f)() end
+spawnIntro(function()
+    local ok, err = pcall(playIntro)
+    if not ok then warn("[Intro] " .. tostring(err)) end
+end)
